@@ -108,7 +108,7 @@ def evaluate(args, model, criterion, data_loader, device):
 			torch.cuda.synchronize()
 			batch_size = video.shape[0]
 
-			if args.local_rank == 0 and (last_batch or batch_idx % args.print_freq == 0):
+			if last_batch or batch_idx % args.print_freq == 0:
 
 				acc1, acc5 = misc.accuracy(output, target, topk=(1, 5))
 
@@ -123,18 +123,20 @@ def evaluate(args, model, criterion, data_loader, device):
 				top1_logger.update(acc1.item(), n=batch_size)
 				top5_logger.update(acc5.item(), n=batch_size)
 				time_logger.update(batch_size / (time.time() - end))
-				print(
-					'{0}: [{1:>4d}/{2}]  '
-					'Time: {batch_time.val:>4.3f} ({batch_time.avg:>4.3f})  '
-					'Loss: {loss.val:>4.4f} ({loss.avg:>6.4f})  '
-					'Acc@1: {top1.val:>4.4f} ({top1.avg:>4.4f})  '
-					'Acc@5: {top5.val:>4.4f} ({top5.avg:>4.4f})'.format(
-						header, batch_idx, last_idx,
-						batch_time=time_logger,
-						loss=loss_logger,
-						top1=top1_logger,
-						top5=top5_logger)
-				)
+
+				if args.local_rank == 0:
+					print(
+						'{0}: [{1:>4d}/{2}]  '
+						'Time: {batch_time.val:>4.3f} ({batch_time.avg:>4.3f})  '
+						'Loss: {loss.val:>4.4f} ({loss.avg:>6.4f})  '
+						'Acc@1: {top1.val:>4.4f} ({top1.avg:>4.4f})  '
+						'Acc@5: {top5.val:>4.4f} ({top5.avg:>4.4f})'.format(
+							header, batch_idx, last_idx,
+							batch_time=time_logger,
+							loss=loss_logger,
+							top1=top1_logger,
+							top5=top5_logger)
+					)
 
 	print(f"{header} Loss: {loss_logger.avg:.3f} Acc@1 {top1_logger.avg:.3f} Acc@5 {top5_logger.avg:.3f}")
 	return loss_logger.avg, top1_logger.avg, top5_logger.avg
