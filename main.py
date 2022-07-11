@@ -1,6 +1,6 @@
-import datetime
 import os
 import time
+import datetime
 import warnings
 
 from utils import misc, presets
@@ -50,17 +50,16 @@ def train_one_epoch(args, model, criterion, optimizer, lr_scheduler, data_loader
 		if last_batch or batch_idx % args.print_freq == 0:
 			lrl = [param_group['lr'] for param_group in optimizer.param_groups]
 			lr = sum(lrl) / len(lrl)
-
 			acc1, acc5 = misc.accuracy(output, target, topk=(1, 5))
 
 			if args.distributed:
-				reduced_loss = reduce_tensor(loss.data, args.world_size)
+				loss = reduce_tensor(loss.data, args.world_size)
 				acc1 = reduce_tensor(acc1, args.world_size)
 				acc5 = reduce_tensor(acc5, args.world_size)
 			else:
-				reduced_loss = loss.data
+				loss = loss.data
 
-			loss_logger.update(reduced_loss.item(), n=batch_size)
+			loss_logger.update(loss.item(), n=batch_size)
 			top1_logger.update(acc1.item(), n=batch_size)
 			top5_logger.update(acc5.item(), n=batch_size)
 			time_logger.update(batch_size / (time.time() - start_time))
@@ -98,43 +97,44 @@ def evaluate(args, model, criterion, data_loader, device):
 	last_idx = len(data_loader) - 1
 
 	with torch.inference_mode():
-		for batch_idx, video, target in enumerate(data_loader):
+		for batch_idx, (video, target) in enumerate(data_loader):
 			last_batch = batch_idx == last_idx
 			video = video.to(device, non_blocking=True)
 			target = target.to(device, non_blocking=True)
 
 			output = model(video)
 			loss = criterion(output, target)
-			acc1, acc5 = misc.accuracy(output, target, topk=(1, 5))
-
-			if args.distributed:
-				loss = reduce_tensor(loss.data, args.world_size)
-				acc1 = reduce_tensor(acc1, args.world_size)
-				acc5 = reduce_tensor(acc5, args.world_size)
-			else:
-				loss = loss.data
 
 			torch.cuda.synchronize()
 			batch_size = video.shape[0]
 
-			loss_logger.update(loss.item(), n=batch_size)
-			top1_logger.update(acc1.item(), n=batch_size)
-			top5_logger.update(acc5.item(), n=batch_size)
-			time_logger.update(batch_size / (time.time() - end))
+			if args.local_rank == 0 and (last_batch or batch_idx % args.print_freq == 0):
 
-	if args.local_rank == 0 and (last_batch or batch_idx % args.print_freq == 0):
-		print(
-			'{0}: [{1:>4d}/{2}]  '
-			'Time: {batch_time.val:>4.3f} ({batch_time.avg:>4.3f})  '
-			'Loss: {loss.val:>4.4f} ({loss.avg:>6.4f})  '
-			'Acc@1: {top1.val:>4.4f} ({top1.avg:>4.4f})  '
-			'Acc@5: {top5.val:>4.4f} ({top5.avg:>4.4f})'.format(
-				header, batch_idx, last_idx,
-				batch_time=time_logger,
-				loss=loss_logger,
-				top1=top1_logger,
-				top5=top5_logger)
-		)
+				acc1, acc5 = misc.accuracy(output, target, topk=(1, 5))
+
+				if args.distributed:
+					loss = reduce_tensor(loss.data, args.world_size)
+					acc1 = reduce_tensor(acc1, args.world_size)
+					acc5 = reduce_tensor(acc5, args.world_size)
+				else:
+					loss = loss.data
+
+				loss_logger.update(loss.item(), n=batch_size)
+				top1_logger.update(acc1.item(), n=batch_size)
+				top5_logger.update(acc5.item(), n=batch_size)
+				time_logger.update(batch_size / (time.time() - end))
+				print(
+					'{0}: [{1:>4d}/{2}]  '
+					'Time: {batch_time.val:>4.3f} ({batch_time.avg:>4.3f})  '
+					'Loss: {loss.val:>4.4f} ({loss.avg:>6.4f})  '
+					'Acc@1: {top1.val:>4.4f} ({top1.avg:>4.4f})  '
+					'Acc@5: {top5.val:>4.4f} ({top5.avg:>4.4f})'.format(
+						header, batch_idx, last_idx,
+						batch_time=time_logger,
+						loss=loss_logger,
+						top1=top1_logger,
+						top5=top5_logger)
+				)
 
 	print(f"{header} Loss: {loss_logger.avg:.3f} Acc@1 {top1_logger.avg:.3f} Acc@5 {top5_logger.avg:.3f}")
 	return loss_logger.avg, top1_logger.avg, top5_logger.avg
@@ -355,10 +355,6 @@ def parse_args():
 	parser = argparse.ArgumentParser(description="PyTorch Video Classification Training")
 
 	parser.add_argument("--data-path", default="../../Datasets/UCF-101/videos/", type=str, help="dataset path")
-	parser.add_argument(
-		"--kinetics-version", default="400", type=str, choices=["400", "600"], help="Select kinetics version"
-	)
-	parser.add_argument("--model", default="r2plus1d_18", type=str, help="model name")
 	parser.add_argument("--device", default="cuda", type=str, help="device (Use cuda or cpu Default: cuda)")
 	parser.add_argument("--clip-len", default=16, type=int, metavar="N", help="number of frames per clip")
 	parser.add_argument("--frame-rate", default=15, type=int, metavar="N", help="the frame rate")
@@ -366,7 +362,7 @@ def parse_args():
 		"--clips-per-video", default=5, type=int, metavar="N", help="maximum number of clips per video to consider"
 	)
 	parser.add_argument(
-		"-b", "--batch-size", default=24, type=int, help="images per gpu, the total batch size is $NGPU x batch_size"
+		"-b", "--batch-size", default=48, type=int, help="images per gpu, the total batch size is $NGPU x batch_size"
 	)
 	parser.add_argument("--epochs", default=2, type=int, metavar="N", help="number of total epochs to run")
 	parser.add_argument(
