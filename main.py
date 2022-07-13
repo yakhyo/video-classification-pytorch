@@ -4,6 +4,7 @@ import datetime
 import warnings
 
 from utils import misc, presets
+from nets.nn import r2plus1d_18
 from utils.misc import AverageMeter, reduce_tensor  # test
 import torch.utils.data
 import torchvision
@@ -261,7 +262,7 @@ def main(args):
 	)
 
 	print("Creating model")
-	model = torchvision.models.video.__dict__[args.model](weights=args.weights)
+	model = r2plus1d_18()
 	model.to(device)
 	if args.distributed and args.sync_bn:
 		model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model)
@@ -364,7 +365,7 @@ def parse_args():
 		"--clips-per-video", default=5, type=int, metavar="N", help="maximum number of clips per video to consider"
 	)
 	parser.add_argument(
-		"-b", "--batch-size", default=48, type=int, help="images per gpu, the total batch size is $NGPU x batch_size"
+		"-b", "--batch-size", default=24, type=int, help="images per gpu, the total batch size is $NGPU x batch_size"
 	)
 	parser.add_argument("--epochs", default=2, type=int, metavar="N", help="number of total epochs to run")
 	parser.add_argument(
