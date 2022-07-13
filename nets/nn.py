@@ -106,29 +106,46 @@ class BasicBlock(nn.Module):
 		return out
 
 
-class BasicStem(nn.Sequential):
+class BasicStem(nn.Module):
 	"""The default conv-batchnorm-relu stem"""
 
 	def __init__(self) -> None:
-		super().__init__(
-			nn.Conv3d(3, 64, kernel_size=(3, 7, 7), stride=(1, 2, 2), padding=(1, 3, 3), bias=False),
-			nn.BatchNorm3d(64),
-			nn.ReLU(inplace=True),
-		)
+		super().__init__()
+		self.conv = nn.Conv3d(3, 64, kernel_size=(3, 7, 7), stride=(1, 2, 2), padding=(1, 3, 3), bias=False)
+		self.norm = nn.BatchNorm3d(64)
+		self.relu = nn.ReLU(inplace=True)
+
+	def forward(self, x: Tensor) -> Tensor:
+		x = self.conv(x)
+		x = self.norm(x)
+		x = self.relu(x)
+
+		return x
 
 
-class R2Plus1dStem(nn.Sequential):
+class R2Plus1dStem(nn.Module):
 	"""R(2+1)D stem is different than the default one as it uses separated 3D convolution"""
 
 	def __init__(self) -> None:
-		super().__init__(
-			nn.Conv3d(3, 45, kernel_size=(1, 7, 7), stride=(1, 2, 2), padding=(0, 3, 3), bias=False),
-			nn.BatchNorm3d(45),
-			nn.ReLU(inplace=True),
-			nn.Conv3d(45, 64, kernel_size=(3, 1, 1), stride=(1, 1, 1), padding=(1, 0, 0), bias=False),
-			nn.BatchNorm3d(64),
-			nn.ReLU(inplace=True),
-		)
+		super().__init__()
+		self.conv1 = nn.Conv3d(3, 45, kernel_size=(1, 7, 7), stride=(1, 2, 2), padding=(0, 3, 3), bias=False)
+		self.norm1 = nn.BatchNorm3d(45)
+		self.relu1 = nn.ReLU(inplace=True)
+
+		self.conv2 = nn.Conv3d(45, 64, kernel_size=(3, 1, 1), stride=(1, 1, 1), padding=(1, 0, 0), bias=False)
+		self.norm2 = nn.BatchNorm3d(64)
+		self.relu2 = nn.ReLU(inplace=True)
+
+	def forward(self, x: Tensor) -> Tensor:
+		x = self.conv1(x)
+		x = self.norm1(x)
+		x = self.relu1(x)
+
+		x = self.conv2(x)
+		x = self.norm2(x)
+		x = self.relu2(x)
+
+		return x
 
 
 class VideoResNet(nn.Module):
@@ -139,7 +156,6 @@ class VideoResNet(nn.Module):
 			layers: List[int],
 			stem: Callable[..., nn.Module],
 			num_classes: int = 400,
-			zero_init_residual: bool = False,
 	) -> None:
 
 		super().__init__()
@@ -167,7 +183,6 @@ class VideoResNet(nn.Module):
 			elif isinstance(m, nn.Linear):
 				nn.init.normal_(m.weight, 0, 0.01)
 				nn.init.constant_(m.bias, 0)
-
 
 	def forward(self, x: Tensor) -> Tensor:
 		x = self.stem(x)
@@ -223,6 +238,9 @@ def _video_resnet(
 
 
 def r3d_18(**kwargs: Any) -> VideoResNet:
+	"""Construct 18 layer Resnet3D model.
+	Reference: `A Closer Look at Spatiotemporal Convolutions for Action Recognition <https://arxiv.org/abs/1711.11248>`__.
+	"""
 	return _video_resnet(
 		BasicBlock,
 		[Conv3DSimple] * 4,
@@ -233,6 +251,9 @@ def r3d_18(**kwargs: Any) -> VideoResNet:
 
 
 def mc3_18(**kwargs: Any) -> VideoResNet:
+	"""Construct 18 layer Mixed Convolution network
+	Reference: `A Closer Look at Spatiotemporal Convolutions for Action Recognition <https://arxiv.org/abs/1711.11248>`__.
+	"""
 	return _video_resnet(
 		BasicBlock,
 		[Conv3DSimple] + [Conv3DNoTemporal] * 3,  # type: ignore[list-item]
@@ -243,22 +264,8 @@ def mc3_18(**kwargs: Any) -> VideoResNet:
 
 
 def r2plus1d_18(**kwargs) -> VideoResNet:
-	"""Construct 18 layer deep R(2+1)D network as in
-	.. betastatus:: video module
+	"""Construct 18 layer deep R(2+1)D network
 	Reference: `A Closer Look at Spatiotemporal Convolutions for Action Recognition <https://arxiv.org/abs/1711.11248>`__.
-	Args:
-		weights (:class:`~torchvision.models.video.R2Plus1D_18_Weights`, optional): The
-			pretrained weights to use. See
-			:class:`~torchvision.models.video.R2Plus1D_18_Weights`
-			below for more details, and possible values. By default, no
-			pre-trained weights are used.
-		progress (bool): If True, displays a progress bar of the download to stderr. Default is True.
-		**kwargs: parameters passed to the ``torchvision.models.video.resnet.VideoResNet`` base class.
-			Please refer to the `source code
-			<https://github.com/pytorch/vision/blob/main/torchvision/models/video/resnet.py>`_
-			for more details about this class.
-	.. autoclass:: torchvision.models.video.R2Plus1D_18_Weights
-		:members:
 	"""
 
 	return _video_resnet(
