@@ -1,1 +1,1 @@
-torchrun --nproc_per_node=1 test.py --cache-dataset
+python test.py --cache-dataset

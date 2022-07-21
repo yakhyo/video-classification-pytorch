@@ -3,8 +3,6 @@ import time
 import datetime
 import warnings
 
-from sklearn.metrics import precision_score, recall_score
-
 from nets.nn import r3d_18, mc3_18, r2plus1d_18
 from utils import misc, presets
 from utils.misc import AverageMeter
@@ -70,6 +68,7 @@ def validate(args, model, criterion, data_loader, device):
 
 	print(f"{header} Loss: {loss_logger.avg:.3f} Acc@1 {top1_logger.avg:.3f} Acc@5 {top5_logger.avg:.3f}")
 	return loss_logger.avg, top1_logger.avg, top5_logger.avg
+
 
 def _get_cache_path(filepath):
 	import hashlib

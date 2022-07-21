@@ -1,6 +1,8 @@
-Video Classification using PyTorch on UCF-101 dataset
+## Video Classification using PyTorch on UCF-101 dataset
 
-- Download the dataset
+
+### Dataset:
+- Download the dataset from [here](https://www.crcv.ucf.edu/research/data-sets/ucf101/)
 - Prepare the folders as shown below:
 
 ```
@@ -18,3 +20,20 @@ Video Classification using PyTorch on UCF-101 dataset
              ...
 ```
 
+### Train
+```commandline
+bash train.sh
+```
+`train.sh`:
+```
+torchrun --nproc_per_node=$NUM_GPU train.py --amp --cache-dataset
+```
+
+### Test
+```commandline
+bash test.sh
+```
+`test.sh`:
+```
+python test.py --cache-dataset
+```
