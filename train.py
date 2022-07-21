@@ -149,7 +149,7 @@ def _get_cache_path(filepath):
 	import hashlib
 
 	h = hashlib.sha1(filepath.encode()).hexdigest()
-	cache_path = os.path.join("~", "Datasets", "UCF101", "cache", h[:10] + ".pt")
+	cache_path = os.path.join("~", "Datasets", "UCF-101", "cache", h[:10] + ".pt")
 	cache_path = os.path.expanduser(cache_path)
 	return cache_path
 
@@ -334,7 +334,7 @@ def main(args):
 		train_one_epoch(args, model, criterion, optimizer, lr_scheduler, data_loader, device, epoch, scaler)
 		val_loss, val_acc1, val_acc5 = evaluate(args, model, criterion, data_loader_test, device=device)
 
-		if args.output_dir:
+		if args.weights_dir:
 			checkpoint = {
 				"model": model_without_ddp.state_dict(),
 				"optimizer": optimizer.state_dict(),

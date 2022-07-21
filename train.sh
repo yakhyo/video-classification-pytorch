@@ -1,1 +1,1 @@
-torchrun --nproc_per_node=1 main.py --amp
+torchrun --nproc_per_node=1 train.py --amp --cache-dataset
