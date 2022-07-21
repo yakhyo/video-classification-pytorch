@@ -106,58 +106,99 @@ class BasicBlock(nn.Module):
 		return out
 
 
-class BasicStem(nn.Module):
+class Bottleneck(nn.Module):
+	expansion = 4
+
+	def __init__(
+			self,
+			inplanes: int,
+			planes: int,
+			conv_builder: Callable[..., nn.Module],
+			stride: int = 1,
+			downsample: Optional[nn.Module] = None,
+	) -> None:
+		super().__init__()
+		midplanes = (inplanes * planes * 3 * 3 * 3) // (inplanes * 3 * 3 + 3 * planes)
+
+		# 1x1x1
+		self.conv1 = nn.Sequential(
+			nn.Conv3d(inplanes, planes, kernel_size=1, bias=False), nn.BatchNorm3d(planes), nn.ReLU(inplace=True)
+		)
+		# Second kernel
+		self.conv2 = nn.Sequential(
+			conv_builder(planes, planes, midplanes, stride), nn.BatchNorm3d(planes), nn.ReLU(inplace=True)
+		)
+
+		# 1x1x1
+		self.conv3 = nn.Sequential(
+			nn.Conv3d(planes, planes * self.expansion, kernel_size=1, bias=False),
+			nn.BatchNorm3d(planes * self.expansion),
+		)
+		self.relu = nn.ReLU(inplace=True)
+		self.downsample = downsample
+		self.stride = stride
+
+	def forward(self, x: Tensor) -> Tensor:
+		residual = x
+
+		out = self.conv1(x)
+		out = self.conv2(out)
+		out = self.conv3(out)
+
+		if self.downsample is not None:
+			residual = self.downsample(x)
+
+		out += residual
+		out = self.relu(out)
+
+		return out
+
+
+class BasicStem(nn.Sequential):
 	"""The default conv-batchnorm-relu stem"""
 
 	def __init__(self) -> None:
-		super().__init__()
-		self.conv = nn.Conv3d(3, 64, kernel_size=(3, 7, 7), stride=(1, 2, 2), padding=(1, 3, 3), bias=False)
-		self.norm = nn.BatchNorm3d(64)
-		self.relu = nn.ReLU(inplace=True)
-
-	def forward(self, x: Tensor) -> Tensor:
-		x = self.conv(x)
-		x = self.norm(x)
-		x = self.relu(x)
-
-		return x
+		super().__init__(
+			nn.Conv3d(3, 64, kernel_size=(3, 7, 7), stride=(1, 2, 2), padding=(1, 3, 3), bias=False),
+			nn.BatchNorm3d(64),
+			nn.ReLU(inplace=True),
+		)
 
 
-class R2Plus1dStem(nn.Module):
+class R2Plus1dStem(nn.Sequential):
 	"""R(2+1)D stem is different than the default one as it uses separated 3D convolution"""
 
 	def __init__(self) -> None:
-		super().__init__()
-		self.conv1 = nn.Conv3d(3, 45, kernel_size=(1, 7, 7), stride=(1, 2, 2), padding=(0, 3, 3), bias=False)
-		self.norm1 = nn.BatchNorm3d(45)
-		self.relu1 = nn.ReLU(inplace=True)
-
-		self.conv2 = nn.Conv3d(45, 64, kernel_size=(3, 1, 1), stride=(1, 1, 1), padding=(1, 0, 0), bias=False)
-		self.norm2 = nn.BatchNorm3d(64)
-		self.relu2 = nn.ReLU(inplace=True)
-
-	def forward(self, x: Tensor) -> Tensor:
-		x = self.conv1(x)
-		x = self.norm1(x)
-		x = self.relu1(x)
-
-		x = self.conv2(x)
-		x = self.norm2(x)
-		x = self.relu2(x)
-
-		return x
+		super().__init__(
+			nn.Conv3d(3, 45, kernel_size=(1, 7, 7), stride=(1, 2, 2), padding=(0, 3, 3), bias=False),
+			nn.BatchNorm3d(45),
+			nn.ReLU(inplace=True),
+			nn.Conv3d(45, 64, kernel_size=(3, 1, 1), stride=(1, 1, 1), padding=(1, 0, 0), bias=False),
+			nn.BatchNorm3d(64),
+			nn.ReLU(inplace=True),
+		)
 
 
 class VideoResNet(nn.Module):
 	def __init__(
 			self,
-			block: Type[BasicBlock],
+			block: Type[Union[BasicBlock, Bottleneck]],
 			conv_makers: Sequence[Type[Union[Conv3DSimple, Conv3DNoTemporal, Conv2Plus1D]]],
 			layers: List[int],
 			stem: Callable[..., nn.Module],
 			num_classes: int = 400,
+			zero_init_residual: bool = False,
 	) -> None:
-
+		"""Generic resnet video generator.
+		Args:
+			block (Type[Union[BasicBlock, Bottleneck]]): resnet building block
+			conv_makers (List[Type[Union[Conv3DSimple, Conv3DNoTemporal, Conv2Plus1D]]]): generator
+				function for each layer
+			layers (List[int]): number of blocks per layer
+			stem (Callable[..., nn.Module]): module specifying the ResNet stem.
+			num_classes (int, optional): Dimension of the final FC layer. Defaults to 400.
+			zero_init_residual (bool, optional): Zero init bottleneck residual BN. Defaults to False.
+		"""
 		super().__init__()
 		self.inplanes = 64
 
@@ -184,6 +225,11 @@ class VideoResNet(nn.Module):
 				nn.init.normal_(m.weight, 0, 0.01)
 				nn.init.constant_(m.bias, 0)
 
+		if zero_init_residual:
+			for m in self.modules():
+				if isinstance(m, Bottleneck):
+					nn.init.constant_(m.bn3.weight, 0)  # type: ignore[union-attr, arg-type]
+
 	def forward(self, x: Tensor) -> Tensor:
 		x = self.stem(x)
 
@@ -201,7 +247,7 @@ class VideoResNet(nn.Module):
 
 	def _make_layer(
 			self,
-			block: Type[BasicBlock],
+			block: Type[Union[BasicBlock, Bottleneck]],
 			conv_builder: Type[Union[Conv3DSimple, Conv3DNoTemporal, Conv2Plus1D]],
 			planes: int,
 			blocks: int,
@@ -226,7 +272,7 @@ class VideoResNet(nn.Module):
 
 
 def _video_resnet(
-		block: Type[BasicBlock],
+		block: Type[Union[BasicBlock, Bottleneck]],
 		conv_makers: Sequence[Type[Union[Conv3DSimple, Conv3DNoTemporal, Conv2Plus1D]]],
 		layers: List[int],
 		stem: Callable[..., nn.Module],
@@ -251,9 +297,10 @@ def r3d_18(**kwargs: Any) -> VideoResNet:
 
 
 def mc3_18(**kwargs: Any) -> VideoResNet:
-	"""Construct 18 layer Mixed Convolution network
+	"""Construct 18 layer Mixed Convolution network as in
 	Reference: `A Closer Look at Spatiotemporal Convolutions for Action Recognition <https://arxiv.org/abs/1711.11248>`__.
 	"""
+
 	return _video_resnet(
 		BasicBlock,
 		[Conv3DSimple] + [Conv3DNoTemporal] * 3,  # type: ignore[list-item]
@@ -263,8 +310,9 @@ def mc3_18(**kwargs: Any) -> VideoResNet:
 	)
 
 
-def r2plus1d_18(**kwargs) -> VideoResNet:
-	"""Construct 18 layer deep R(2+1)D network
+def r2plus1d_18(**kwargs: Any) -> VideoResNet:
+	"""Construct 18 layer deep R(2+1)D network as in
+	.. betastatus:: video module
 	Reference: `A Closer Look at Spatiotemporal Convolutions for Action Recognition <https://arxiv.org/abs/1711.11248>`__.
 	"""
 
@@ -277,9 +325,10 @@ def r2plus1d_18(**kwargs) -> VideoResNet:
 	)
 
 
-def profile(model): return sum(p.numel() for p in model.parameters() if p.requires_grad)
+def num_params(model):
+	return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
 
 if __name__ == '__main__':
-	model = r2plus1d_18()
-	print(profile(model))
+	net = r2plus1d_18()
+	print(num_params(net))

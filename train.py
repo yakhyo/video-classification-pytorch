@@ -1,14 +1,16 @@
-import datetime
 import os
 import time
+import datetime
 import warnings
 
-from utils import misc, presets
+from utils import misc
+from nets.nn import mc3_18, r3d_18, r2plus1d_18
+from utils.misc import AverageMeter, reduce_tensor  # test
+from utils.random import random_seed
+from utils.presets import VideoClassificationPresetEval, VideoClassificationPresetTrain
 
 import torch.utils.data
 import torchvision
-
-# import torchvision.datasets.video_utils
 
 from torch import nn
 from torch.utils.data.dataloader import default_collate
@@ -17,14 +19,18 @@ from torchvision.datasets.samplers import DistributedSampler, UniformClipSampler
 warnings.filterwarnings('ignore')
 
 
-def train_one_epoch(model, criterion, optimizer, lr_scheduler, data_loader, device, epoch, print_freq, scaler=None):
+def train_one_epoch(args, model, criterion, optimizer, lr_scheduler, data_loader, device, epoch, scaler=None):
 	model.train()
-	metric_logger = misc.MetricLogger(delimiter="  ")
-	metric_logger.add_meter("lr", misc.SmoothedValue(window_size=1, fmt="{value}"))
-	metric_logger.add_meter("clips/s", misc.SmoothedValue(window_size=10, fmt="{value:.3f}"))
+	last_idx = len(data_loader) - 1
 
-	header = f"Epoch: [{epoch}]"
-	for video, target in metric_logger.log_every(data_loader, print_freq, header):
+	time_logger = AverageMeter()  # img/s
+	loss_logger = AverageMeter()  # loss
+	top1_logger = AverageMeter()  # top1 accuracy
+	top5_logger = AverageMeter()  # top5 accuracy
+
+	for batch_idx, (video, target) in enumerate(data_loader):
+		last_batch = batch_idx == last_idx
+		batch_size = video.shape[0]
 		start_time = time.time()
 		video, target = video.to(device), target.to(device)
 		with torch.cuda.amp.autocast(enabled=scaler is not None):
@@ -41,71 +47,109 @@ def train_one_epoch(model, criterion, optimizer, lr_scheduler, data_loader, devi
 			loss.backward()
 			optimizer.step()
 
+		torch.cuda.synchronize()
+
 		acc1, acc5 = misc.accuracy(output, target, topk=(1, 5))
-		batch_size = video.shape[0]
-		metric_logger.update(loss=loss.item(), lr=optimizer.param_groups[0]["lr"])
-		metric_logger.meters["acc1"].update(acc1.item(), n=batch_size)
-		metric_logger.meters["acc5"].update(acc5.item(), n=batch_size)
-		metric_logger.meters["clips/s"].update(batch_size / (time.time() - start_time))
+
+		if args.distributed:
+			loss = reduce_tensor(loss.data, args.world_size)
+			acc1 = reduce_tensor(acc1, args.world_size)
+			acc5 = reduce_tensor(acc5, args.world_size)
+		else:
+			loss = loss.data
+
+		if last_batch or batch_idx % args.print_freq == 0:
+			lrl = [param_group['lr'] for param_group in optimizer.param_groups]
+			lr = sum(lrl) / len(lrl)
+
+			loss_logger.update(loss.item(), n=batch_size)
+			top1_logger.update(acc1.item(), n=batch_size)
+			top5_logger.update(acc5.item(), n=batch_size)
+			time_logger.update(batch_size / (time.time() - start_time))
+
+			if args.local_rank == 0:
+				print(
+					"Train: {} [{:>4d}/{} ({:>3.0f}%)]  "
+					"Loss: {loss.val:>6.4f} ({loss.avg:>6.4f})  "
+					"Acc@1: {acc1.val:>6.4f} ({acc1.avg:>6.4f}) "
+					"Acc@5: {acc5.val:>6.4f} ({acc5.avg:>6.4f}) "
+					"LR: {lr:.3e}  "
+					"Data: {data_time.val:.3f} ({data_time.avg:.3f})".format(
+						epoch, batch_idx, len(data_loader),
+						100. * batch_idx / last_idx,
+						loss=loss_logger,
+						acc1=top1_logger,
+						acc5=top5_logger,
+						lr=lr,
+						data_time=time_logger))
+
 		lr_scheduler.step()
+	return loss_logger.avg, top1_logger.avg, top5_logger.avg
 
 
-def evaluate(model, criterion, data_loader, device):
+def evaluate(args, model, criterion, data_loader, device):
 	model.eval()
-	metric_logger = misc.MetricLogger(delimiter="  ")
+
+	time_logger = AverageMeter()  # img/s
+	loss_logger = AverageMeter()  # loss
+	top1_logger = AverageMeter()  # top1 accuracy
+	top5_logger = AverageMeter()  # top5 accuracy
+
 	header = "Test:"
-	num_processed_samples = 0
+
+	end = time.time()
+	last_idx = len(data_loader) - 1
+
 	with torch.inference_mode():
-		for video, target in metric_logger.log_every(data_loader, 100, header):
+		for batch_idx, (video, target) in enumerate(data_loader):
+			last_batch = batch_idx == last_idx
 			video = video.to(device, non_blocking=True)
 			target = target.to(device, non_blocking=True)
+
 			output = model(video)
 			loss = criterion(output, target)
 
-			acc1, acc5 = misc.accuracy(output, target, topk=(1, 5))
-			# FIXME need to take into account that the datasets
-			# could have been padded in distributed setup
+			torch.cuda.synchronize()
 			batch_size = video.shape[0]
-			metric_logger.update(loss=loss.item())
-			metric_logger.meters["acc1"].update(acc1.item(), n=batch_size)
-			metric_logger.meters["acc5"].update(acc5.item(), n=batch_size)
-			num_processed_samples += batch_size
-	# gather the stats from all processes
-	num_processed_samples = misc.reduce_across_processes(num_processed_samples)
-	if isinstance(data_loader.sampler, DistributedSampler):
-		# Get the len of UniformClipSampler inside DistributedSampler
-		num_data_from_sampler = len(data_loader.sampler.dataset)
-	else:
-		num_data_from_sampler = len(data_loader.sampler)
 
-	if (
-			hasattr(data_loader.dataset, "__len__")
-			and num_data_from_sampler != num_processed_samples
-			and torch.distributed.get_rank() == 0
-	):
-		# See FIXME above
-		warnings.warn(
-			f"It looks like the sampler has {num_data_from_sampler} samples, but {num_processed_samples} "
-			"samples were used for the validation, which might bias the results. "
-			"Try adjusting the batch size and / or the world size. "
-			"Setting the world size to 1 is always a safe bet."
-		)
+			acc1, acc5 = misc.accuracy(output, target, topk=(1, 5))
 
-	metric_logger.synchronize_between_processes()
+			if args.distributed:
+				loss = reduce_tensor(loss.data, args.world_size)
+				acc1 = reduce_tensor(acc1, args.world_size)
+				acc5 = reduce_tensor(acc5, args.world_size)
+			else:
+				loss = loss.data
 
-	print(
-		" * Clip Acc@1 {top1.global_avg:.3f} Clip Acc@5 {top5.global_avg:.3f}".format(
-			top1=metric_logger.acc1, top5=metric_logger.acc5
-		)
-	)
-	return metric_logger.acc1.global_avg
+			if last_batch or batch_idx % args.print_freq == 0:
+				loss_logger.update(loss.item(), n=batch_size)
+				top1_logger.update(acc1.item(), n=batch_size)
+				top5_logger.update(acc5.item(), n=batch_size)
+				time_logger.update(batch_size / (time.time() - end))
+
+				if args.local_rank == 0:
+					print(
+						'{0}: [{1:>4d}/{2}]  '
+						'Time: {batch_time.val:>4.3f} ({batch_time.avg:>4.3f})  '
+						'Loss: {loss.val:>4.4f} ({loss.avg:>6.4f})  '
+						'Acc@1: {top1.val:>4.4f} ({top1.avg:>4.4f})  '
+						'Acc@5: {top5.val:>4.4f} ({top5.avg:>4.4f})'.format(
+							header, batch_idx, last_idx,
+							batch_time=time_logger,
+							loss=loss_logger,
+							top1=top1_logger,
+							top5=top5_logger)
+					)
+
+	print(f"{header} Loss: {loss_logger.avg:.3f} Acc@1 {top1_logger.avg:.3f} Acc@5 {top5_logger.avg:.3f}")
+	return loss_logger.avg, top1_logger.avg, top5_logger.avg
 
 
 def _get_cache_path(filepath):
 	import hashlib
 
 	h = hashlib.sha1(filepath.encode()).hexdigest()
-	cache_path = os.path.join("~", ".torch", "vision", "datasets", "kinetics", h[:10] + ".pt")
+	cache_path = os.path.join("~", "Datasets", "UCF101", "cache", h[:10] + ".pt")
 	cache_path = os.path.expanduser(cache_path)
 	return cache_path
 
@@ -117,8 +161,9 @@ def collate_fn(batch):
 
 
 def main(args):
-	if args.output_dir:
-		misc.mkdir(args.output_dir)
+	random_seed()
+
+	os.makedirs(args.weights_dir, exist_ok=True)
 
 	misc.init_distributed_mode(args)
 	print(args)
@@ -139,7 +184,7 @@ def main(args):
 	print("Loading training data")
 	st = time.time()
 	cache_path = _get_cache_path(traindir)
-	transform_train = presets.VideoClassificationPresetTrain(crop_size=(112, 112), resize_size=(128, 171))
+	transform_train = VideoClassificationPresetTrain(crop_size=(112, 112), resize_size=(128, 171))
 
 	if args.cache_dataset and os.path.exists(cache_path):
 		print(f"Loading dataset_train from {cache_path}")
@@ -150,9 +195,10 @@ def main(args):
 			print("It is recommended to pre-compute the dataset cache on a single-gpu first, as it will be faster")
 		dataset = torchvision.datasets.UCF101(
 			args.data_path,
-			annotation_path='../../../../data/private/john/UCF-101/annotations/',
+			annotation_path=args.annotations,
 			frames_per_clip=args.clip_len,
 			train=True,
+			num_workers=os.cpu_count(),
 			step_between_clips=1,
 			transform=transform_train,
 			frame_rate=args.frame_rate,
@@ -167,11 +213,7 @@ def main(args):
 	print("Loading validation data")
 	cache_path = _get_cache_path(valdir)
 
-	if args.weights and args.test_only:
-		weights = torchvision.models.get_weight(args.weights)
-		transform_test = weights.transforms()
-	else:
-		transform_test = presets.VideoClassificationPresetEval(crop_size=(112, 112), resize_size=(128, 171))
+	transform_test = VideoClassificationPresetEval(crop_size=(112, 112), resize_size=(128, 171))
 
 	if args.cache_dataset and os.path.exists(cache_path):
 		print(f"Loading dataset_test from {cache_path}")
@@ -182,9 +224,10 @@ def main(args):
 			print("It is recommended to pre-compute the dataset cache on a single-gpu first, as it will be faster")
 		dataset_test = torchvision.datasets.UCF101(
 			args.data_path,
-			annotation_path='../../../../data/private/john/UCF-101/annotations/',
+			annotation_path=args.annotations,
 			frames_per_clip=args.clip_len,
 			train=False,
+			num_workers=os.cpu_count(),
 			step_between_clips=1,
 			transform=transform_test,
 			frame_rate=args.frame_rate,
@@ -220,8 +263,9 @@ def main(args):
 	)
 
 	print("Creating model")
-	model = torchvision.models.video.__dict__[args.model](weights=args.weights)
+	model = r2plus1d_18(num_classes=len(dataset.classes))
 	model.to(device)
+
 	if args.distributed and args.sync_bn:
 		model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model)
 
@@ -286,8 +330,10 @@ def main(args):
 	for epoch in range(args.start_epoch, args.epochs):
 		if args.distributed:
 			train_sampler.set_epoch(epoch)
-		train_one_epoch(model, criterion, optimizer, lr_scheduler, data_loader, device, epoch, args.print_freq, scaler)
-		acc1_glob = evaluate(model, criterion, data_loader_test, device=device)
+
+		train_one_epoch(args, model, criterion, optimizer, lr_scheduler, data_loader, device, epoch, scaler)
+		val_loss, val_acc1, val_acc5 = evaluate(args, model, criterion, data_loader_test, device=device)
+
 		if args.output_dir:
 			checkpoint = {
 				"model": model_without_ddp.state_dict(),
@@ -299,11 +345,11 @@ def main(args):
 			if args.amp:
 				checkpoint["scaler"] = scaler.state_dict()
 
-			misc.save_on_master(checkpoint, os.path.join(args.output_dir, "last.pth"))
-			if best < acc1_glob:
-				misc.save_on_master(checkpoint, os.path.join(args.output_dir, "best.pth"))
+			misc.save_on_master(checkpoint, os.path.join(args.weights_dir, "last.pth"))
+			if best < val_acc1:
+				misc.save_on_master(checkpoint, os.path.join(args.weights_dir, "best.pth"))
 
-			best = max(best, acc1_glob)
+			best = max(best, val_acc1)
 
 	total_time = time.time() - start_time
 	total_time_str = str(datetime.timedelta(seconds=int(total_time)))
@@ -315,72 +361,50 @@ def parse_args():
 
 	parser = argparse.ArgumentParser(description="PyTorch Video Classification Training")
 
-	parser.add_argument("--data-path", default="../../../../data/private/john/UCF-101/videos/", type=str, help="dataset path")
-	parser.add_argument("--model", default="r2plus1d_18", type=str, help="model name")
+	# Data params
+	parser.add_argument("--data-path", default="../../Datasets/UCF-101/videos/", type=str, help="dataset path")
+	parser.add_argument("--annotations", default="../../Datasets/UCF-101/annotations", type=str, help="dataset path")
+	parser.add_argument("--cache-dataset", action="store_true", help="Cache the datasets for quicker initialization")
 	parser.add_argument("--device", default="cuda", type=str, help="device (Use cuda or cpu Default: cuda)")
-	parser.add_argument("--clip-len", default=16, type=int, metavar="N", help="number of frames per clip")
-	parser.add_argument("--frame-rate", default=15, type=int, metavar="N", help="the frame rate")
-	parser.add_argument(
-		"--clips-per-video", default=5, type=int, metavar="N", help="maximum number of clips per video to consider"
-	)
-	parser.add_argument(
-		"-b", "--batch-size", default=24, type=int, help="images per gpu, the total batch size is $NGPU x batch_size"
-	)
-	parser.add_argument("--epochs", default=100, type=int, metavar="N", help="number of total epochs to run")
-	parser.add_argument(
-		"-j", "--workers", default=24, type=int, metavar="N", help="number of data loading workers (default: 10)"
-	)
+
+	# Video frame params
+	parser.add_argument("--clip-len", default=16, type=int, help="number of frames per clip")
+	parser.add_argument("--frame-rate", default=15, type=int, help="the frame rate")
+	parser.add_argument("--clips-per-video", default=5, type=int, help="maximum number of clips per video to consider")
+
+	# DataLoader params
+	parser.add_argument("--batch-size", default=24, type=int, help="the total batch size is $NGPU x batch_size")
+	parser.add_argument("--epochs", default=2, type=int, help="number of total epochs to run")
+	parser.add_argument("--workers", default=24, type=int, help="number of data loading workers")
+
+	# Optimizer params
 	parser.add_argument("--lr", default=0.01, type=float, help="initial learning rate")
-	parser.add_argument("--momentum", default=0.9, type=float, metavar="M", help="momentum")
-	parser.add_argument(
-		"--wd",
-		"--weight-decay",
-		default=1e-4,
-		type=float,
-		metavar="W",
-		help="weight decay (default: 1e-4)",
-		dest="weight_decay",
-	)
+	parser.add_argument("--momentum", default=0.9, type=float, help="momentum")
+	parser.add_argument("--weight-decay", default=1e-4, type=float, help="weight decay (default: 1e-4)")
+
+	# Learning rate scheduler
 	parser.add_argument("--lr-milestones", nargs="+", default=[20, 30, 40], type=int, help="decrease lr on milestones")
 	parser.add_argument("--lr-gamma", default=0.1, type=float, help="decrease lr by a factor of lr-gamma")
 	parser.add_argument("--lr-warmup-epochs", default=10, type=int, help="the number of epochs to warmup (default: 10)")
 	parser.add_argument("--lr-warmup-method", default="linear", type=str, help="the warmup method (default: linear)")
 	parser.add_argument("--lr-warmup-decay", default=0.001, type=float, help="the decay for lr")
+
 	parser.add_argument("--print-freq", default=10, type=int, help="print frequency")
-	parser.add_argument("--output-dir", default=".", type=str, help="path to save outputs")
+	parser.add_argument("--weights-dir", default="weights", type=str, help="path to save outputs")
 	parser.add_argument("--resume", default="", type=str, help="path of checkpoint")
 	parser.add_argument("--start-epoch", default=0, type=int, metavar="N", help="start epoch")
-	parser.add_argument(
-		"--cache-dataset",
-		default=False,
-		dest="cache_dataset",
-		help="Cache the datasets for quicker initialization. It also serializes the transforms",
-		action="store_true",
-	)
-	parser.add_argument(
-		"--sync-bn",
-		dest="sync_bn",
-		help="Use sync batch norm",
-		action="store_true",
-	)
-	parser.add_argument(
-		"--test-only",
-		dest="test_only",
-		help="Only test the model",
-		action="store_true",
-	)
-	parser.add_argument(
-		"--use-deterministic-algorithms", action="store_true", help="Forces the use of deterministic algorithms only."
-	)
 
-	# distributed training parameters
-	parser.add_argument("--world-size", default=1, type=int, help="number of distributed processes")
-	parser.add_argument("--dist-url", default="env://", type=str, help="url used to set up distributed training")
-
-	parser.add_argument("--weights", default=None, type=str, help="the weights enum name to load")
+	parser.add_argument("--sync-bn", action="store_true", help="Use sync batch norm")
+	parser.add_argument("--test-only", action="store_true", help="Only test the model")
 
 	# Mixed precision training parameters
 	parser.add_argument("--amp", action="store_true", help="Use torch.cuda.amp for mixed precision training")
+	parser.add_argument("--use-deterministic-algorithms", action="store_true", help="Force use deterministic algorithm")
+
+	# Distributed training parameters
+	parser.add_argument("--world-size", default=1, type=int, help="number of distributed processes")
+	parser.add_argument("--local-rank", default=0, type=int, help="number of distributed processes")
+	parser.add_argument("--dist-url", default="env://", type=str, help="url used to set up distributed training")
 
 	args = parser.parse_args()
 
@@ -390,8 +414,3 @@ def parse_args():
 if __name__ == "__main__":
 	args = parse_args()
 	main(args)
-
-
-
-# "../../../../data/private/john/UCF-101/videos/"
-# '../../../../data/private/john/UCF-101/annotations/'
