@@ -362,8 +362,8 @@ def parse_args():
 	parser = argparse.ArgumentParser(description="PyTorch Video Classification Training")
 
 	# Data params
-	parser.add_argument("--data-path", default="../../Datasets/UCF-101/videos/", type=str, help="dataset path")
-	parser.add_argument("--annotations", default="../../Datasets/UCF-101/annotations", type=str, help="dataset path")
+	parser.add_argument("--data-path", default="../../../../data/private/john/UCF-101/videos", type=str, help="dataset path")
+	parser.add_argument("--annotations", default="../../../../data/private/john/UCF-101/annotations", type=str, help="dataset path")
 	parser.add_argument("--cache-dataset", action="store_true", help="Cache the datasets for quicker initialization")
 	parser.add_argument("--device", default="cuda", type=str, help="device (Use cuda or cpu Default: cuda)")
 
@@ -373,9 +373,9 @@ def parse_args():
 	parser.add_argument("--clips-per-video", default=5, type=int, help="maximum number of clips per video to consider")
 
 	# DataLoader params
-	parser.add_argument("--batch-size", default=24, type=int, help="the total batch size is $NGPU x batch_size")
-	parser.add_argument("--epochs", default=2, type=int, help="number of total epochs to run")
-	parser.add_argument("--workers", default=24, type=int, help="number of data loading workers")
+	parser.add_argument("--batch-size", default=64, type=int, help="the total batch size is $NGPU x batch_size")
+	parser.add_argument("--epochs", default=100, type=int, help="number of total epochs to run")
+	parser.add_argument("--workers", default=36, type=int, help="number of data loading workers")
 
 	# Optimizer params
 	parser.add_argument("--lr", default=0.01, type=float, help="initial learning rate")

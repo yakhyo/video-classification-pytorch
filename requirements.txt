@@ -1,0 +1,19 @@
+# Package - Version
+
+# Base ----------------------
+matplotlib>=3.5.2
+numpy>=1.23.0
+opencv-python>=4.5.4.60
+pathtools>=0.1.2
+Pillow>=9.1.1
+PyYAML>=6.0
+torch>=1.12.0+cu113
+torchaudio>=0.12.0+cu113
+torchvision>=0.13.0+cu113
+tqdm>=4.64.0
+
+# Video ----------------------
+av>=9.2.0
+
+# System utilization --------
+psutil>=5.9.1

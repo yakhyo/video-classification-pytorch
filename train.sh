@@ -1,1 +1,1 @@
-torchrun --nproc_per_node=1 train.py --amp --cache-dataset
+python3 -m torch.distributed.run --nproc_per_node=2 train.py --amp --cache-dataset
