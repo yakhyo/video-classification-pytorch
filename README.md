@@ -1,4 +1,4 @@
-## Video Classification using PyTorch on UCF-101 dataset
+## Video Classification using R2Plus1D PyTorch model on UCF-101 dataset
 
 
 ### Dataset:
