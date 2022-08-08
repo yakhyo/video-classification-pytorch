@@ -362,8 +362,8 @@ def parse_args():
 	parser = argparse.ArgumentParser(description="PyTorch Video Classification Training")
 
 	# Data params
-	parser.add_argument("--data-path", default="../../../../data/private/john/UCF-101/videos", type=str, help="dataset path")
-	parser.add_argument("--annotations", default="../../../../data/private/john/UCF-101/annotations", type=str, help="dataset path")
+	parser.add_argument("--data-path", default="data/UCF-101/videos", type=str, help="dataset path")
+	parser.add_argument("--annotations", default="data/UCF-101/annotations", type=str, help="dataset path")
 	parser.add_argument("--cache-dataset", action="store_true", help="Cache the datasets for quicker initialization")
 	parser.add_argument("--device", default="cuda", type=str, help="device (Use cuda or cpu Default: cuda)")
 
