@@ -26,7 +26,7 @@ bash train.sh
 ```
 `train.sh`:
 ```
-torchrun --nproc_per_node=$NUM_GPU train.py --amp --cache-dataset
+python3 -m torch.distributed.run --nproc_per_node=2 train.py --amp --cache-dataset
 ```
 
 ### Test
@@ -35,5 +35,5 @@ bash test.sh
 ```
 `test.sh`:
 ```
-python test.py --cache-dataset
+python3 test.py --cache-dataset
 ```
